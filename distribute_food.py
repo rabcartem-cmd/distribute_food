@@ -59,14 +59,14 @@ def get_target_budget(age):
 
 print(f"Читаем файл: {FILE_PATH}...")
 
-# 1. Загрузка данных о людях
+# 1. Загрузка данных о людях (Колонки X, Y)
 try:
-    df_people = pd.read_excel(FILE_PATH, usecols="W,X,Y")
-    df_people.columns = ['Name', 'Age', 'Family']
+    df_people = pd.read_excel(FILE_PATH, usecols="X,Y")
+    df_people.columns = ['Age', 'Family']
     df_people = df_people.dropna(subset=['Family'])
     df_people['Family'] = df_people['Family'].astype(str).str.strip().str.lower()
 except Exception as e:
-    print(f"Ошибка при чтении колонок W, X, Y: {e}")
+    print(f"Ошибка при чтении колонок X, Y: {e}")
     sys.exit(1)
 
 # Считаем бюджет и размер каждой семьи
@@ -120,7 +120,6 @@ for _, row in df_products.iterrows():
         })
 
 df_items = pd.DataFrame(split_items)
-# Сортировка от дорогих к дешевым важна, чтобы большие семьи впитали тяжелые продукты первыми
 df_items = df_items.sort_values(by='Cost', ascending=False).reset_index(drop=True)
 
 # Считаем ожидаемое количество позиций (пропорционально людям)
@@ -147,26 +146,17 @@ def _add_item_to_family(f, item):
     category_counts[f][cat_key] = category_counts[f].get(cat_key, 0) + 1
 
 def candidate_score(f, item):
-    """
-    Предиктивная оценка: 'Что будет, если я отдам эту позицию именно этой семье?'
-    Чем ниже итоговый балл, тем лучше эта семья подходит для данного продукта.
-    """
-    # Смотрим в будущее: считаем показатели так, словно предмет УЖЕ добавлен
+    """Предиктивная оценка: 'Что будет, если я отдам эту позицию именно этой семье?'"""
     new_budget = current_spent[f] + item['Cost']
     new_items_count = len(family_items[f]) + 1
     
     budget_fill = new_budget / family_budgets[f]
     items_fill = new_items_count / expected_items[f]
     
-    # 1. Жесткий штраф за дисбаланс. Если предмет забивает бюджет, но не дает объема в штуках (или наоборот)
     imbalance_penalty = abs(budget_fill - items_fill) * 4.0 
-    
-    # 2. Квадратичный штраф за заполнение (заставляет метрики расти плавно и равномерно)
     fill_penalty = (budget_fill ** 2) + (items_fill ** 2)
     
-    # 3. Штраф за однообразие категорий (чтобы у всех было понемногу овощей, мяса и бакалеи)
     cat_count = category_counts[f].get(item['Category'], 0) + 1
-    # Ожидаем, что любая категория занимает примерно 15-20% от всех вещей семьи
     cat_fill = cat_count / max(1.0, (expected_items[f] * 0.15)) 
     
     return fill_penalty + imbalance_penalty + (cat_fill * 0.5)
@@ -176,7 +166,6 @@ def assign_item(item, is_reassignment=False):
     prod_name = str(item['Product']).lower()
     item_cost = item['Cost']
     
-    # Шаг 1: Проверка исключений
     for exc_keyword, exc_family in EXCEPTIONS.items():
         if exc_keyword in prod_name and exc_family in valid_families:
             _add_item_to_family(exc_family, item)
@@ -185,27 +174,22 @@ def assign_item(item, is_reassignment=False):
     if not valid_families:
         return
 
-    # Шаг 2: Ищем тех, кому хватает бюджета
     affordable_families = [f for f in valid_families if current_spent[f] + item_cost <= family_budgets[f]]
     
     if affordable_families:
-        # Минимизируем количество дубликатов (чтобы не дать одной семье 5 пачек соли)
         min_prod_count = min(product_counts[f].get(prod_name, 0) for f in affordable_families)
         candidates = [f for f in affordable_families if product_counts[f].get(prod_name, 0) == min_prod_count]
         
-        # Выбираем семью, для которой добавление этого предмета будет самым гармоничным
         assigned_family = min(candidates, key=lambda f: candidate_score(f, item))
         _add_item_to_family(assigned_family, item)
         return
 
-    # Шаг 3: Ни у кого не хватает бюджета (Резервный план с умным изъятием)
     target_f = min(valid_families, key=lambda f: candidate_score(f, item))
     
     if not is_reassignment:
         rem_budget = family_budgets[target_f] - current_spent[target_f]
         deficit = item_cost - rem_budget
         
-        # Сортируем корзину: будем забирать самые дешевые позиции
         fam_items = sorted(family_items[target_f], key=lambda x: x['Cost'])
         
         removed_items = []
@@ -222,23 +206,19 @@ def assign_item(item, is_reassignment=False):
                 items_to_keep.append(existing_item)
         
         if removed_items:
-            # Забираем мелкие вещи
             family_items[target_f] = items_to_keep
             current_spent[target_f] -= freed_amount
             for r_item in removed_items:
                 product_counts[target_f][str(r_item['Product']).lower()] -= 1
                 category_counts[target_f][r_item['Category']] -= 1
             
-            # Кладем одну большую
             _add_item_to_family(target_f, item)
             
-            # Раскидываем изъятую мелочь обратно по другим семьям
             removed_items.sort(key=lambda x: x['Cost'], reverse=True)
             for r_item in removed_items:
                 assign_item(r_item, is_reassignment=True)
             return
 
-    # Шаг 4: Безусловное добавление
     _add_item_to_family(target_f, item)
 
 for _, item in df_items.iterrows():
@@ -279,4 +259,4 @@ with pd.ExcelWriter(OUTPUT_PATH, engine='openpyxl') as writer:
     df_summary = pd.DataFrame(summary_data)
     df_summary.to_excel(writer, sheet_name='Общая_Сводка', index=False)
 
-print("Успешно завершено! Теперь количество позиций строго пропорционально людям.")
+print("Успешно завершено!")
